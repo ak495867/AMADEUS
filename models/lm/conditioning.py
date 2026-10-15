@@ -66,6 +66,7 @@ class TextConditioningEncoder(nn.Module):
         self.pretrained_name = pretrained_name
         self.tokenizer = None
         self.encoder_model = None
+        self.cache = {}
         self.proj = nn.Sequential(
             nn.Linear(in_dim, out_dim),
             nn.GELU(),
@@ -92,21 +93,30 @@ class TextConditioningEncoder(nn.Module):
             return self.proj(text_or_emb)
 
         if isinstance(text_or_emb, str):
-            text_or_emb = [text_or_emb]
+            if text_or_emb in self.cache:
+                return self.cache[text_or_emb]
+            texts = [text_or_emb]
+            is_single = True
+        else:
+            texts = text_or_emb
+            is_single = False
 
         self._init_hf(device)
         if self.tokenizer and self.encoder_model:
-            inputs = self.tokenizer(text_or_emb, padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
+            inputs = self.tokenizer(texts, padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
             with torch.no_grad():
                 outputs = self.encoder_model(**inputs)
                 emb = outputs.last_hidden_state.mean(dim=1)
                 if emb.shape[-1] != self.in_dim:
                     emb = F.pad(emb, (0, self.in_dim - emb.shape[-1])) if emb.shape[-1] < self.in_dim else emb[:, :self.in_dim]
-            return self.proj(emb)
+            out = self.proj(emb)
+            if is_single:
+                self.cache[text_or_emb] = out
+            return out
 
         batch_chars = []
         max_len = 0
-        for text in text_or_emb:
+        for text in texts:
             b = [min(ord(c), 255) for c in text[:128]]
             if len(b) == 0:
                 b = [0]
@@ -119,4 +129,7 @@ class TextConditioningEncoder(nn.Module):
 
         idx_tensor = torch.tensor(padded, dtype=torch.long, device=device)
         char_embs = self.fallback_emb(idx_tensor).mean(dim=1)
-        return self.proj(char_embs)
+        out = self.proj(char_embs)
+        if is_single:
+            self.cache[text_or_emb] = out
+        return out

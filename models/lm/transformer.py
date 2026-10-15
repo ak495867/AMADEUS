@@ -230,13 +230,9 @@ class SemanticTokenLM(nn.Module):
         guided_logits = uncond_logits + cfg * (cond_logits - uncond_logits)
         last_step_logits = guided_logits[:, -1, :, :] / max(temperature, 1e-4)
 
-        step_tokens = []
-        for k in range(self.num_codebooks):
-            probs = F.softmax(last_step_logits[:, k, :], dim=-1)
-            tok = torch.multinomial(probs, num_samples=1)
-            step_tokens.append(tok)
-
-        next_token = torch.cat(step_tokens, dim=-1).unsqueeze(1)
+        u = torch.rand_like(last_step_logits)
+        gumbel = -torch.log(-torch.log(u + 1e-10) + 1e-10)
+        next_token = torch.argmax(last_step_logits + gumbel, dim=-1).unsqueeze(1)
         curr_tokens = torch.cat([curr_tokens, next_token], dim=1)
 
         offset = prefix_tokens.shape[1]
@@ -261,13 +257,9 @@ class SemanticTokenLM(nn.Module):
             guided_logits = uncond_logits + cfg * (cond_logits - uncond_logits)
             last_step_logits = guided_logits[:, -1, :, :] / max(temperature, 1e-4)
 
-            step_tokens = []
-            for k in range(self.num_codebooks):
-                probs = F.softmax(last_step_logits[:, k, :], dim=-1)
-                tok = torch.multinomial(probs, num_samples=1)
-                step_tokens.append(tok)
-
-            next_token = torch.cat(step_tokens, dim=-1).unsqueeze(1)
+            u = torch.rand_like(last_step_logits)
+            gumbel = -torch.log(-torch.log(u + 1e-10) + 1e-10)
+            next_token = torch.argmax(last_step_logits + gumbel, dim=-1).unsqueeze(1)
             curr_tokens = torch.cat([curr_tokens, next_token], dim=1)
             offset += 1
 

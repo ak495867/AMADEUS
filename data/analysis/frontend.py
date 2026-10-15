@@ -13,19 +13,15 @@ class AudioAnalysisFrontend:
         self.projection_clap = nn.Linear(512, 512).to(self.device)
         self.projection_timbre = nn.Linear(256, 256).to(self.device)
 
-    def compute_chroma(self, waveform):
-        if waveform.dim() == 2:
-            mono = waveform.mean(dim=0)
-        else:
-            mono = waveform
-        n_fft = 4096
-        hop_length = 1024
+    def compute_stft_mag(self, mono, n_fft=2048, hop_length=512):
         window = torch.hann_window(n_fft, device=mono.device)
         stft = torch.stft(mono, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
-        mag = torch.abs(stft)
+        return torch.abs(stft)
+
+    def compute_chroma_from_mag(self, mag):
         num_bins = mag.shape[0]
-        chroma = torch.zeros((12, mag.shape[1]), device=mono.device)
-        freqs = torch.linspace(0, self.sample_rate / 2, num_bins, device=mono.device)
+        chroma = torch.zeros((12, mag.shape[1]), device=mag.device)
+        freqs = torch.linspace(0, self.sample_rate / 2, num_bins, device=mag.device)
         for i in range(1, num_bins):
             f = freqs[i].item()
             if f < 20.0 or f > 5000.0:
@@ -35,6 +31,11 @@ class AudioAnalysisFrontend:
             chroma[pc] += mag[i]
         norm = torch.norm(chroma, p=2, dim=0, keepdim=True) + 1e-7
         return chroma / norm
+
+    def compute_chroma(self, waveform):
+        mono = waveform.mean(dim=0) if waveform.dim() == 2 else waveform
+        mag = self.compute_stft_mag(mono, n_fft=2048, hop_length=512)
+        return self.compute_chroma_from_mag(mag)
 
     def estimate_key(self, chroma):
         chroma_sum = chroma.sum(dim=1)
@@ -67,10 +68,7 @@ class AudioAnalysisFrontend:
         return best_key, best_mode
 
     def estimate_tempo_and_beats(self, waveform):
-        if waveform.dim() == 2:
-            mono = waveform.mean(dim=0)
-        else:
-            mono = waveform
+        mono = waveform.mean(dim=0) if waveform.dim() == 2 else waveform
         frame_len = 2048
         hop_len = 512
         if mono.numel() < frame_len:
@@ -104,45 +102,33 @@ class AudioAnalysisFrontend:
         return round(bpm, 1), beat_grid, downbeats
 
     def extract_f0(self, waveform, frame_rate=25):
-        if waveform.dim() == 2:
-            mono = waveform.mean(dim=0)
-        else:
-            mono = waveform
-
+        mono = waveform.mean(dim=0) if waveform.dim() == 2 else waveform
         hop_length = int(self.sample_rate / frame_rate)
         frame_size = hop_length * 2
         total_frames = max(1, mono.shape[-1] // hop_length)
 
-        f0_list = []
+        usable_len = min(mono.shape[-1], total_frames * hop_length)
+        if usable_len < frame_size:
+            return torch.zeros((1, total_frames), device=waveform.device, dtype=torch.float32)
+
         min_lag = int(self.sample_rate / 600.0)
         max_lag = int(self.sample_rate / 50.0)
 
-        for i in range(total_frames):
-            start = i * hop_length
-            end = min(start + frame_size, mono.shape[-1])
-            frame = mono[start:end]
-            if frame.shape[0] < max_lag * 2:
-                f0_list.append(0.0)
-                continue
+        step_frames = mono[:total_frames * hop_length].unfold(0, min(frame_size, mono.shape[-1]), hop_length)
+        step_frames = step_frames - step_frames.mean(dim=-1, keepdim=True)
 
-            frame = frame - frame.mean()
-            pad = frame.shape[0]
-            fft_frame = torch.fft.rfft(F.pad(frame, (0, pad)))
-            autocorr = torch.fft.irfft(fft_frame * torch.conj(fft_frame))[:frame.shape[0]]
+        n_pad = step_frames.shape[-1]
+        fft_frames = torch.fft.rfft(F.pad(step_frames, (0, n_pad)))
+        autocorr = torch.fft.irfft(fft_frames * torch.conj(fft_frames))[:, :step_frames.shape[-1]]
 
-            search_region = autocorr[min_lag:min(max_lag, autocorr.shape[0])]
-            if search_region.numel() > 0:
-                best_lag = torch.argmax(search_region).item() + min_lag
-                energy = autocorr[0].item() + 1e-7
-                peak_val = autocorr[best_lag].item()
-                if peak_val / energy > 0.3:
-                    f0_list.append(self.sample_rate / best_lag)
-                else:
-                    f0_list.append(0.0)
-            else:
-                f0_list.append(0.0)
+        search_region = autocorr[:, min_lag:min(max_lag, autocorr.shape[-1])]
+        best_lags = torch.argmax(search_region, dim=-1) + min_lag
+        energy = autocorr[:, 0] + 1e-7
+        peak_vals = torch.gather(autocorr, 1, best_lags.unsqueeze(-1)).squeeze(-1)
 
-        return torch.tensor(f0_list, device=waveform.device, dtype=torch.float32).unsqueeze(0)
+        valid_mask = (peak_vals / energy) > 0.3
+        f0_vals = torch.where(valid_mask, self.sample_rate / best_lags.float(), torch.zeros_like(best_lags.float()))
+        return f0_vals.unsqueeze(0)
 
     def estimate_structure(self, chroma, duration):
         num_frames = chroma.shape[1]
@@ -195,68 +181,57 @@ class AudioAnalysisFrontend:
         return sections
 
     def estimate_lufs(self, waveform):
-        if waveform.dim() == 2:
-            mono = waveform.mean(dim=0)
-        else:
-            mono = waveform
+        mono = waveform.mean(dim=0) if waveform.dim() == 2 else waveform
         power = torch.mean(mono ** 2).item()
         if power <= 1e-12:
             return -70.0
         lufs = -0.691 + 10.0 * math.log10(power)
         return float(round(lufs, 2))
 
-    def extract_clap_embedding(self, waveform):
-        if waveform.dim() == 2:
-            mono = waveform.mean(dim=0)
-        else:
-            mono = waveform
-
-        n_fft = 2048
-        hop_length = 512
-        window = torch.hann_window(n_fft, device=mono.device)
-        stft = torch.stft(mono, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
-        mag = torch.abs(stft)
+    def extract_clap_from_mag(self, mag):
         spec_summary = mag.mean(dim=-1)
         if spec_summary.shape[0] > 512:
             spec_summary = F.adaptive_avg_pool1d(spec_summary.unsqueeze(0), 512).squeeze(0)
         elif spec_summary.shape[0] < 512:
             spec_summary = F.pad(spec_summary, (0, 512 - spec_summary.shape[0]))
-
         projected = self.projection_clap(spec_summary)
         return F.normalize(projected, p=2, dim=-1)
 
-    def extract_timbre_embedding(self, waveform):
-        if waveform.dim() == 2:
-            mono = waveform.mean(dim=0)
-        else:
-            mono = waveform
+    def extract_clap_embedding(self, waveform):
+        mono = waveform.mean(dim=0) if waveform.dim() == 2 else waveform
+        mag = self.compute_stft_mag(mono, n_fft=2048, hop_length=512)
+        return self.extract_clap_from_mag(mag)
 
-        n_fft = 1024
-        hop_length = 256
-        window = torch.hann_window(n_fft, device=mono.device)
-        stft = torch.stft(mono, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
-        mag = torch.abs(stft)
+    def extract_timbre_from_mag(self, mag):
         timbre_spec = mag.std(dim=-1)
         if timbre_spec.shape[0] > 256:
             timbre_spec = F.adaptive_avg_pool1d(timbre_spec.unsqueeze(0), 256).squeeze(0)
         elif timbre_spec.shape[0] < 256:
             timbre_spec = F.pad(timbre_spec, (0, 256 - timbre_spec.shape[0]))
-
         projected = self.projection_timbre(timbre_spec)
         return F.normalize(projected, p=2, dim=-1)
+
+    def extract_timbre_embedding(self, waveform):
+        mono = waveform.mean(dim=0) if waveform.dim() == 2 else waveform
+        mag = self.compute_stft_mag(mono, n_fft=1024, hop_length=256)
+        return self.extract_timbre_from_mag(mag)
 
     def analyze(self, waveform):
         if waveform.dim() == 1:
             waveform = waveform.unsqueeze(0).repeat(2, 1)
+        mono = waveform.mean(dim=0)
         duration = waveform.shape[-1] / self.sample_rate
-        chroma = self.compute_chroma(waveform)
+
+        shared_mag = self.compute_stft_mag(mono, n_fft=2048, hop_length=512)
+        chroma = self.compute_chroma_from_mag(shared_mag)
+        clap = self.extract_clap_from_mag(shared_mag)
+        timbre = self.extract_timbre_from_mag(shared_mag)
+
         key, mode = self.estimate_key(chroma)
         bpm, beat_grid, downbeats = self.estimate_tempo_and_beats(waveform)
         f0 = self.extract_f0(waveform)
         structure = self.estimate_structure(chroma, duration)
         lufs = self.estimate_lufs(waveform)
-        clap = self.extract_clap_embedding(waveform)
-        timbre = self.extract_timbre_embedding(waveform)
 
         return {
             "key": key,
