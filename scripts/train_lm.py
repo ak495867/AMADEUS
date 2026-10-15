@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from amadeus.models.codec.seanet import SEANetEncoder
 from amadeus.models.lm.transformer import SemanticTokenLM
 from amadeus.models.lm.conditioning import TextConditioningEncoder
 from amadeus.models.rvq.quantizer import ResidualVectorQuantizer
@@ -54,6 +55,15 @@ def train_lm(data_dir="./dataset", epochs=2, batch_size=2, lr=1.5e-4, save_dir="
     lr_scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs, 1), eta_min=1e-6)
     scaler = torch.amp.GradScaler("cuda", enabled=use_cuda)
 
+    encoder = SEANetEncoder(in_channels=2, base_channels=64, latent_dim=64, ratios=[8, 5, 4, 3, 2]).to(device)
+    codec_ckpt = os.path.join(save_dir, "codec_encoder_latest.pt")
+    if os.path.exists(codec_ckpt):
+        load_model_checkpoint(encoder, codec_ckpt, device=device)
+    encoder.eval()
+
+    quantizer = ResidualVectorQuantizer(num_codebooks=4, codebook_size=2048, dim=64).to(device)
+    quantizer.eval()
+
     dataset = MusicAudioDataset(root_dir=data_dir, duration_seconds=4.0)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
 
@@ -70,9 +80,8 @@ def train_lm(data_dir="./dataset", epochs=2, batch_size=2, lr=1.5e-4, save_dir="
                 text_embs = text_encoder(texts, device=device)
                 analysis = frontend.analyze(audio[0])
                 style = analysis["clap"].unsqueeze(0).repeat(audio.shape[0], 1)
-
-            seq_len = 64
-            tokens = torch.randint(0, 2048, (audio.shape[0], seq_len, 4), device=device)
+                z, _, _ = encoder(audio, sample=False)
+                _, tokens, _ = quantizer(z.permute(0, 2, 1))
 
             with torch.amp.autocast(device_type=device.type, enabled=use_cuda, dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16):
                 logits, _ = model(tokens, style, text_emb=text_embs, condition_dropout=0.1)

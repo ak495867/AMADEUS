@@ -7,6 +7,8 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from amadeus.models.dit.dit import DiffusionTransformer
 from amadeus.models.dit.flow_matching import FlowMatchingScheduler
 from amadeus.models.codec.seanet import SEANetEncoder
+from amadeus.models.lm.conditioning import TextConditioningEncoder
+from amadeus.models.rvq.quantizer import ResidualVectorQuantizer
 from amadeus.data.dataset import MusicAudioDataset, DataLoader
 from amadeus.data.analysis.frontend import AudioAnalysisFrontend
 from amadeus.pipeline.checkpoint import save_model_checkpoint, load_model_checkpoint
@@ -31,6 +33,12 @@ def train_dit(data_dir="./dataset", epochs=2, batch_size=2, lr=1e-4, save_dir=".
     if os.path.exists(codec_ckpt):
         load_model_checkpoint(encoder, codec_ckpt, device=device)
     encoder.eval()
+
+    quantizer = ResidualVectorQuantizer(num_codebooks=4, codebook_size=2048, dim=64).to(device)
+    quantizer.eval()
+
+    text_encoder = TextConditioningEncoder(in_dim=768, out_dim=768).to(device)
+    text_encoder.eval()
 
     start_epoch = 0
     global_step = 0
@@ -68,18 +76,22 @@ def train_dit(data_dir="./dataset", epochs=2, batch_size=2, lr=1e-4, save_dir=".
 
         for batch_idx, batch in enumerate(dataloader):
             audio = batch["audio"].to(device)
+            texts = batch["text"]
+
             with torch.no_grad():
                 z, _, _ = encoder(audio, sample=False)
                 analysis = frontend.analyze(audio[0])
                 style = analysis["clap"].unsqueeze(0).repeat(audio.shape[0], 1)
                 loudness = torch.tensor([[analysis["lufs"]]], device=device).repeat(audio.shape[0], 1)
+                text_embs = text_encoder(texts, device=device)
+                _, sem_tokens, _ = quantizer(z.permute(0, 2, 1))
 
             noise = torch.randn_like(z)
             t = scheduler.sample_timesteps(audio.shape[0], device=device)
             x_t, target_v = scheduler.add_noise(z, noise, t)
 
             with torch.amp.autocast(device_type=device.type, enabled=use_cuda, dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16):
-                pred_v = model(x_t, t, style=style, loudness=loudness)
+                pred_v = model(x_t, t, style=style, loudness=loudness, text=text_embs, sem=sem_tokens)
                 loss = F.mse_loss(pred_v, target_v) / grad_accum
 
             scaler.scale(loss).backward()
