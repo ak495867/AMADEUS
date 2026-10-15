@@ -38,13 +38,21 @@ class DistilledDiTStudent(nn.Module):
 
             t_tensor = torch.full((shape[0],), t_curr, device=device)
 
-            if cond is not None:
-                v_cond = self.dit(x, t_tensor, **cond)
-                uncond = {k: None for k in cond}
-                v_uncond = self.dit(x, t_tensor, **uncond)
+            if cond is not None and cfg_scale > 1.0:
+                x_in = torch.cat([x, x], dim=0)
+                t_in = torch.cat([t_tensor, t_tensor], dim=0)
+                batched_cond = {}
+                for k, v in cond.items():
+                    if v is not None and isinstance(v, torch.Tensor):
+                        batched_cond[k] = torch.cat([v, torch.zeros_like(v)], dim=0)
+                    else:
+                        batched_cond[k] = None
+
+                v_out = self.dit(x_in, t_in, **batched_cond)
+                v_cond, v_uncond = v_out.chunk(2, dim=0)
                 v_pred = v_uncond + cfg_scale * (v_cond - v_uncond)
             else:
-                v_pred = self.dit(x, t_tensor)
+                v_pred = self.dit(x, t_tensor, **(cond if cond is not None else {}))
 
             x = x + dt * v_pred
 

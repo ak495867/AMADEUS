@@ -34,6 +34,8 @@ class MelodyEncoder(nn.Module):
             f0 = f0.unsqueeze(1)
         if chroma.dim() == 2:
             chroma = chroma.unsqueeze(0)
+        if chroma.shape[0] != f0.shape[0]:
+            chroma = chroma.repeat(f0.shape[0], 1, 1)
         if chroma.shape[-1] != f0.shape[-1]:
             chroma = F.interpolate(chroma, size=f0.shape[-1], mode="linear", align_corners=False)
         x = torch.cat([f0, chroma], dim=1)
@@ -52,6 +54,8 @@ class RhythmEncoder(nn.Module):
         )
 
     def forward(self, beat_grid_tensor):
+        if beat_grid_tensor.dim() == 2:
+            beat_grid_tensor = beat_grid_tensor.unsqueeze(0)
         return self.mlp(beat_grid_tensor)
 
 class TextConditioningEncoder(nn.Module):

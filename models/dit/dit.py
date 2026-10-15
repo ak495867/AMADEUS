@@ -59,9 +59,8 @@ class DiTBlock(nn.Module):
         qkv = self.qkv_proj(norm_x).reshape(b, seq_len, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        probs = F.softmax(scores, dim=-1)
-        attn_out = torch.matmul(probs, v).transpose(1, 2).reshape(b, seq_len, c)
+        attn_out = F.scaled_dot_product_attention(q, k, v)
+        attn_out = attn_out.transpose(1, 2).reshape(b, seq_len, c)
         msa_out = self.out_proj(attn_out)
 
         x = x + gate_msa.unsqueeze(1) * msa_out

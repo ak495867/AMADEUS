@@ -20,12 +20,15 @@ class RotaryEmbedding(nn.Module):
         x2 = x[..., x.shape[-1] // 2:]
         return torch.cat((-x2, x1), dim=-1)
 
-    def forward(self, q, k):
-        seq_len = q.shape[2]
-        cos = self.cos_cached[:, :, :seq_len, :q.shape[-1]]
-        sin = self.sin_cached[:, :, :seq_len, :q.shape[-1]]
-        q_rot = (q * cos) + (self.rotate_half(q) * sin)
-        k_rot = (k * cos) + (self.rotate_half(k) * sin)
+    def forward(self, q, k, offset=0):
+        seq_len_q = q.shape[2]
+        seq_len_k = k.shape[2]
+        cos_q = self.cos_cached[:, :, offset:offset + seq_len_q, :q.shape[-1]]
+        sin_q = self.sin_cached[:, :, offset:offset + seq_len_q, :q.shape[-1]]
+        cos_k = self.cos_cached[:, :, offset:offset + seq_len_k, :k.shape[-1]]
+        sin_k = self.sin_cached[:, :, offset:offset + seq_len_k, :k.shape[-1]]
+        q_rot = (q * cos_q) + (self.rotate_half(q) * sin_q)
+        k_rot = (k * cos_k) + (self.rotate_half(k) * sin_k)
         return q_rot, k_rot
 
 class MultiCodebookEmbedding(nn.Module):
@@ -69,7 +72,7 @@ class LMTransformerBlock(nn.Module):
             nn.Dropout(dropout)
         )
 
-    def forward(self, x, rope, style_vec, cross_cond=None, causal_mask=None):
+    def forward(self, x, rope, style_vec, cross_cond=None, past_kv=None, offset=0):
         norm_x = self.adaln1(x, style_vec)
         b, seq_len, _ = norm_x.shape
 
@@ -77,13 +80,20 @@ class LMTransformerBlock(nn.Module):
         k = self.k_proj(norm_x).view(b, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(norm_x).view(b, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-        q, k = rope(q, k)
+        q, k = rope(q, k, offset=offset)
 
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        if causal_mask is not None:
-            scores = scores + causal_mask[:seq_len, :seq_len]
-        probs = F.softmax(scores, dim=-1)
-        attn_out = torch.matmul(probs, v).transpose(1, 2).contiguous().view(b, seq_len, self.hidden_size)
+        if past_kv is not None:
+            past_k, past_v = past_kv
+            k = torch.cat([past_k, k], dim=2)
+            v = torch.cat([past_v, v], dim=2)
+        present_kv = (k, v)
+
+        if past_kv is not None:
+            attn_out = F.scaled_dot_product_attention(q, k, v)
+        else:
+            attn_out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+
+        attn_out = attn_out.transpose(1, 2).contiguous().view(b, seq_len, self.hidden_size)
         x = x + self.out_proj(attn_out)
 
         if cross_cond is not None:
@@ -92,7 +102,7 @@ class LMTransformerBlock(nn.Module):
             x = x + c_out
 
         x = x + self.mlp(self.adaln2(x, style_vec))
-        return x
+        return x, present_kv
 
 class SemanticTokenLM(nn.Module):
     def __init__(
@@ -132,10 +142,7 @@ class SemanticTokenLM(nn.Module):
             for _ in range(num_codebooks)
         ])
 
-    def build_causal_mask(self, seq_len, device):
-        return torch.triu(torch.full((seq_len, seq_len), float("-inf"), device=device), diagonal=1)
-
-    def forward(self, tokens, style_vec, text_emb=None, melody_f0=None, melody_chroma=None, beat_grid=None, condition_dropout=0.0):
+    def forward(self, tokens, style_vec, text_emb=None, melody_f0=None, melody_chroma=None, beat_grid=None, condition_dropout=0.0, past_kvs=None, offset=0):
         b, seq_len, _ = tokens.shape
         device = tokens.device
 
@@ -159,27 +166,98 @@ class SemanticTokenLM(nn.Module):
             style_vec = torch.zeros_like(style_vec)
 
         x = self.token_embeddings(tokens)
-        causal_mask = self.build_causal_mask(seq_len, device)
 
-        for layer in self.layers:
-            x = layer(x, self.rope, style_vec, cross_cond=cross_cond, causal_mask=causal_mask)
+        new_kvs = []
+        for i, layer in enumerate(self.layers):
+            layer_past = past_kvs[i] if past_kvs is not None else None
+            x, pres_kv = layer(x, self.rope, style_vec, cross_cond=cross_cond, past_kv=layer_past, offset=offset)
+            new_kvs.append(pres_kv)
 
         x = self.final_ln(x)
         logits = torch.stack([head(x) for head in self.heads], dim=-2)
-        return logits
+        return logits, new_kvs
 
     @torch.no_grad()
     def sample(self, prefix_tokens, style_vec, text_emb=None, melody_f0=None, melody_chroma=None, beat_grid=None, max_new_tokens=500, cfg=3.0, temperature=0.85):
         curr_tokens = prefix_tokens
         b = prefix_tokens.shape[0]
+        device = prefix_tokens.device
 
-        for _ in range(max_new_tokens):
+        init_tokens = torch.cat([curr_tokens, curr_tokens], dim=0)
+        init_style = torch.cat([style_vec, torch.zeros_like(style_vec)], dim=0)
+
+        batched_text = torch.cat([text_emb, torch.zeros_like(text_emb)], dim=0) if text_emb is not None else None
+
+        if melody_f0 is not None:
+            if melody_f0.dim() == 1:
+                melody_f0 = melody_f0.unsqueeze(0).repeat(b, 1)
+            elif melody_f0.dim() == 2 and melody_f0.shape[0] != b:
+                melody_f0 = melody_f0.repeat(b, 1)
+            batched_f0 = torch.cat([melody_f0, torch.zeros_like(melody_f0)], dim=0)
+        else:
+            batched_f0 = None
+
+        if melody_chroma is not None:
+            if melody_chroma.dim() == 2:
+                melody_chroma = melody_chroma.unsqueeze(0).repeat(b, 1, 1)
+            elif melody_chroma.dim() == 3 and melody_chroma.shape[0] != b:
+                melody_chroma = melody_chroma.repeat(b, 1, 1)
+            batched_chroma = torch.cat([melody_chroma, torch.zeros_like(melody_chroma)], dim=0)
+        else:
+            batched_chroma = None
+
+        if beat_grid is not None:
+            if beat_grid.dim() == 2:
+                beat_grid = beat_grid.unsqueeze(0).repeat(b, 1, 1)
+            elif beat_grid.dim() == 3 and beat_grid.shape[0] != b:
+                beat_grid = beat_grid.repeat(b, 1, 1)
+            batched_beat = torch.cat([beat_grid, torch.zeros_like(beat_grid)], dim=0)
+        else:
+            batched_beat = None
+
+        logits, past_kvs = self.forward(
+            init_tokens,
+            init_style,
+            text_emb=batched_text,
+            melody_f0=batched_f0,
+            melody_chroma=batched_chroma,
+            beat_grid=batched_beat,
+            past_kvs=None,
+            offset=0
+        )
+
+        cond_logits, uncond_logits = logits.chunk(2, dim=0)
+        guided_logits = uncond_logits + cfg * (cond_logits - uncond_logits)
+        last_step_logits = guided_logits[:, -1, :, :] / max(temperature, 1e-4)
+
+        step_tokens = []
+        for k in range(self.num_codebooks):
+            probs = F.softmax(last_step_logits[:, k, :], dim=-1)
+            tok = torch.multinomial(probs, num_samples=1)
+            step_tokens.append(tok)
+
+        next_token = torch.cat(step_tokens, dim=-1).unsqueeze(1)
+        curr_tokens = torch.cat([curr_tokens, next_token], dim=1)
+
+        offset = prefix_tokens.shape[1]
+
+        for _ in range(1, max_new_tokens):
             if curr_tokens.shape[1] >= self.max_seq_len:
                 break
 
-            cond_logits = self.forward(curr_tokens, style_vec, text_emb=text_emb, melody_f0=melody_f0, melody_chroma=melody_chroma, beat_grid=beat_grid)
-            uncond_logits = self.forward(curr_tokens, torch.zeros_like(style_vec), text_emb=None, melody_f0=None, melody_chroma=None, beat_grid=None)
+            batched_next = torch.cat([next_token, next_token], dim=0)
+            logits, past_kvs = self.forward(
+                batched_next,
+                init_style,
+                text_emb=None,
+                melody_f0=None,
+                melody_chroma=None,
+                beat_grid=None,
+                past_kvs=past_kvs,
+                offset=offset
+            )
 
+            cond_logits, uncond_logits = logits.chunk(2, dim=0)
             guided_logits = uncond_logits + cfg * (cond_logits - uncond_logits)
             last_step_logits = guided_logits[:, -1, :, :] / max(temperature, 1e-4)
 
@@ -191,5 +269,6 @@ class SemanticTokenLM(nn.Module):
 
             next_token = torch.cat(step_tokens, dim=-1).unsqueeze(1)
             curr_tokens = torch.cat([curr_tokens, next_token], dim=1)
+            offset += 1
 
         return curr_tokens

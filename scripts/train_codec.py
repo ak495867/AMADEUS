@@ -8,16 +8,27 @@ from amadeus.models.codec.losses import CodecLossSuite
 from amadeus.data.dataset import MusicAudioDataset, DataLoader
 from amadeus.pipeline.checkpoint import save_model_checkpoint
 
-def train_codec(data_dir="./dataset", epochs=2, batch_size=2, lr=2e-4, save_dir="./checkpoints", device="cpu"):
+def train_codec(data_dir="./dataset", epochs=2, batch_size=2, lr=2e-4, save_dir="./checkpoints", device="cpu", compile_model=False, grad_accum=1):
     os.makedirs(save_dir, exist_ok=True)
     device = torch.device(device if torch.cuda.is_available() and device != "cpu" else "cpu")
+    use_cuda = device.type == "cuda"
 
     encoder = SEANetEncoder(in_channels=2, base_channels=64, latent_dim=64, ratios=[8, 5, 4, 3, 2]).to(device)
     decoder = HiFiGANCodecDecoder(latent_dim=64, base_channels=128, out_channels=2, ratios=[2, 3, 4, 5, 8], enable_stems=True).to(device)
     loss_suite = CodecLossSuite().to(device)
 
+    if compile_model and hasattr(torch, "compile"):
+        try:
+            encoder = torch.compile(encoder)
+            decoder = torch.compile(decoder)
+        except Exception:
+            pass
+
     opt_g = optim.AdamW(list(encoder.parameters()) + list(decoder.parameters()), lr=lr, betas=(0.8, 0.99))
     opt_d = optim.AdamW(loss_suite.mpd.parameters(), lr=lr, betas=(0.8, 0.99))
+
+    scaler_g = torch.amp.GradScaler("cuda", enabled=use_cuda)
+    scaler_d = torch.amp.GradScaler("cuda", enabled=use_cuda)
 
     dataset = MusicAudioDataset(root_dir=data_dir, duration_seconds=4.0)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
@@ -30,27 +41,42 @@ def train_codec(data_dir="./dataset", epochs=2, batch_size=2, lr=2e-4, save_dir=
     for epoch in range(epochs):
         epoch_g_loss = 0.0
         epoch_d_loss = 0.0
+        opt_g.zero_grad()
+        opt_d.zero_grad()
+
         for batch_idx, batch in enumerate(dataloader):
             x = batch["audio"].to(device)
 
-            opt_g.zero_grad()
-            z, mu, logvar = encoder(x)
-            x_pred = decoder(z)
-            loss_g, loss_dict = loss_suite.generator_loss(x_pred, x, mu, logvar)
-            loss_g.backward()
-            opt_g.step()
+            with torch.amp.autocast(device_type=device.type, enabled=use_cuda, dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16):
+                z, mu, logvar = encoder(x)
+                x_pred = decoder(z)
+                loss_g, _ = loss_suite.generator_loss(x_pred, x, mu, logvar)
+                loss_g = loss_g / grad_accum
 
-            opt_d.zero_grad()
-            loss_d = loss_suite.discriminator_loss(x_pred.detach(), x)
-            loss_d.backward()
-            opt_d.step()
+            scaler_g.scale(loss_g).backward()
 
-            epoch_g_loss += loss_g.item()
-            epoch_d_loss += loss_d.item()
+            if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == len(dataloader):
+                scaler_g.step(opt_g)
+                scaler_g.update()
+                opt_g.zero_grad()
+
+            with torch.amp.autocast(device_type=device.type, enabled=use_cuda, dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16):
+                loss_d = loss_suite.discriminator_loss(x_pred.detach(), x)
+                loss_d = loss_d / grad_accum
+
+            scaler_d.scale(loss_d).backward()
+
+            if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == len(dataloader):
+                scaler_d.step(opt_d)
+                scaler_d.update()
+                opt_d.zero_grad()
+
+            epoch_g_loss += loss_g.item() * grad_accum
+            epoch_d_loss += loss_d.item() * grad_accum
             global_step += 1
 
             if batch_idx % 10 == 0:
-                print(f"Epoch {epoch + 1}/{epochs} | Batch {batch_idx} | Loss G: {loss_g.item():.4f} | Loss D: {loss_d.item():.4f}")
+                print(f"Epoch {epoch + 1}/{epochs} | Batch {batch_idx} | Loss G: {loss_g.item() * grad_accum:.4f} | Loss D: {loss_d.item() * grad_accum:.4f}")
 
         save_model_checkpoint(encoder, os.path.join(save_dir, f"codec_encoder_epoch_{epoch+1}.pt"), opt_g, epoch+1, global_step)
         save_model_checkpoint(decoder, os.path.join(save_dir, f"codec_decoder_epoch_{epoch+1}.pt"), opt_g, epoch+1, global_step)
@@ -67,5 +93,7 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--save_dir", type=str, default="./checkpoints")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--compile", action="store_true")
+    parser.add_argument("--grad_accum", type=int, default=1)
     args = parser.parse_args()
-    train_codec(args.data_dir, args.epochs, args.batch_size, args.lr, args.save_dir, args.device)
+    train_codec(args.data_dir, args.epochs, args.batch_size, args.lr, args.save_dir, args.device, args.compile, args.grad_accum)

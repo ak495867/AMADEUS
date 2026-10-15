@@ -29,7 +29,8 @@ class FlowMatchingScheduler:
         steps=32,
         cond=None,
         cfg_scale=3.5,
-        melody_cfg_scale=2.0
+        melody_cfg_scale=2.0,
+        cfg_rescale=0.7
     ):
         x = torch.randn(shape, device=device)
         timesteps = torch.linspace(1.0, 0.0, steps + 1, device=device)
@@ -41,21 +42,29 @@ class FlowMatchingScheduler:
 
             t_tensor = torch.full((shape[0],), t_curr, device=device)
 
-            if cond is not None:
-                v_cond = model(x, t_tensor, **cond)
+            if cond is not None and cfg_scale > 1.0:
+                x_in = torch.cat([x, x], dim=0)
+                t_in = torch.cat([t_tensor, t_tensor], dim=0)
 
-                uncond = {k: None for k in cond}
-                v_uncond = model(x, t_tensor, **uncond)
+                batched_cond = {}
+                for k, v in cond.items():
+                    if v is not None and isinstance(v, torch.Tensor):
+                        batched_cond[k] = torch.cat([v, torch.zeros_like(v)], dim=0)
+                    else:
+                        batched_cond[k] = None
 
-                if "melody" in cond and cond["melody"] is not None:
-                    no_mel_cond = {k: v for k, v in cond.items()}
-                    no_mel_cond["melody"] = None
-                    v_no_mel = model(x, t_tensor, **no_mel_cond)
-                    v_pred = v_uncond + cfg_scale * (v_no_mel - v_uncond) + melody_cfg_scale * (v_cond - v_no_mel)
-                else:
-                    v_pred = v_uncond + cfg_scale * (v_cond - v_uncond)
+                v_out = model(x_in, t_in, **batched_cond)
+                v_cond, v_uncond = v_out.chunk(2, dim=0)
+
+                v_pred = v_uncond + cfg_scale * (v_cond - v_uncond)
+
+                if cfg_rescale > 0.0:
+                    std_cond = torch.std(v_cond, dim=(-1, -2), keepdim=True)
+                    std_pred = torch.std(v_pred, dim=(-1, -2), keepdim=True)
+                    rescaled = v_pred * (std_cond / (std_pred + 1e-7))
+                    v_pred = (1.0 - cfg_rescale) * v_pred + cfg_rescale * rescaled
             else:
-                v_pred = model(x, t_tensor)
+                v_pred = model(x, t_tensor, **(cond if cond is not None else {}))
 
             x = x + dt * v_pred
 

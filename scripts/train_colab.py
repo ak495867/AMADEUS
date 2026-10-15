@@ -30,6 +30,8 @@ def main():
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output_audio", type=str, default="generated_output.wav")
+    parser.add_argument("--compile", action="store_true")
+    parser.add_argument("--grad_accum", type=int, default=1)
     args = parser.parse_args()
 
     print(f"Running AMADEUS Colab Engine on Device: {args.device}")
@@ -45,7 +47,9 @@ def main():
         epochs=args.epochs_codec,
         batch_size=args.batch_size,
         save_dir=args.checkpoints_dir,
-        device=args.device
+        device=args.device,
+        compile_model=args.compile,
+        grad_accum=args.grad_accum
     )
 
     print("Step 2/3: Training Flow Matching Diffusion Transformer (DiT)...")
@@ -54,7 +58,9 @@ def main():
         epochs=args.epochs_dit,
         batch_size=args.batch_size,
         save_dir=args.checkpoints_dir,
-        device=args.device
+        device=args.device,
+        compile_model=args.compile,
+        grad_accum=args.grad_accum
     )
 
     print("Step 3/3: Training Semantic Token LM...")
@@ -63,7 +69,9 @@ def main():
         epochs=args.epochs_lm,
         batch_size=args.batch_size,
         save_dir=args.checkpoints_dir,
-        device=args.device
+        device=args.device,
+        compile_model=args.compile,
+        grad_accum=args.grad_accum
     )
 
     print("Running Model Evaluation Suite...")
