@@ -4,7 +4,7 @@ found = find_packages()
 packages = ["amadeus"] + [f"amadeus.{p}" for p in found]
 package_dir = {"amadeus": "."}
 for p in found:
-    package_dir[f"amadeus.{p}"] = p
+    package_dir[f"amadeus.{p}"] = p.replace(".", "/")
 
 setup(
     name="amadeus",

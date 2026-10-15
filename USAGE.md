@@ -147,16 +147,24 @@ python scripts/train_dit.py --dataset gtzan --batch_size 8 --epochs 25 --lr 0.00
 ```
 
 ### 4. End-to-End Multi-Stage Training
-Sequentially trains Codec, LM, and Flow Matching DiT with automatic dataset downloading, mixed-precision AMP, gradient clipping, and cosine annealing:
+Sequentially trains Codec, LM, and Flow Matching DiT with mixed-precision AMP, gradient clipping, and cosine annealing:
+
+Train with built-in procedural multi-track dataset (instant, offline, no download needed):
 
 ```bash
-python scripts/train_full.py --dataset gtzan --epochs 5 --batch_size 4 --lr 0.0002 --checkpoint_dir ./checkpoints
+python scripts/train_full.py --dataset synthetic --epochs_codec 5 --epochs_dit 5 --epochs_lm 5 --batch_size 4 --checkpoints_dir ./checkpoints
 ```
 
-Train using FMA (Free Music Archive) dataset:
+Train using GTZAN or FMA dataset:
 
 ```bash
-python scripts/train_full.py --dataset fma --fma_size small --epochs 10 --batch_size 4 --checkpoint_dir ./checkpoints
+python scripts/train_full.py --dataset gtzan --epochs_codec 5 --epochs_dit 5 --epochs_lm 5 --batch_size 4 --checkpoints_dir ./checkpoints
+```
+
+Train using a custom directory of audio files:
+
+```bash
+python scripts/train_full.py --dataset custom --data_dir /path/to/my_audio_files --batch_size 4 --checkpoints_dir ./checkpoints
 ```
 
 ---

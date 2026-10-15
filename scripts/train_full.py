@@ -23,7 +23,7 @@ def save_audio_wav(filepath, tensor_audio, sample_rate=48000):
 def main():
     parser = argparse.ArgumentParser(description="AMADEUS Full Model Training Engine")
     parser.add_argument("--data_dir", type=str, default="./real_music_dataset")
-    parser.add_argument("--dataset", type=str, default="gtzan", choices=["gtzan", "fma_small", "custom"])
+    parser.add_argument("--dataset", type=str, default="gtzan", choices=["gtzan", "fma_small", "synthetic", "custom"])
     parser.add_argument("--checkpoints_dir", type=str, default="./checkpoints")
     parser.add_argument("--stage", type=str, default="all", choices=["all", "codec", "dit", "lm"])
     parser.add_argument("--epochs_codec", type=int, default=10)

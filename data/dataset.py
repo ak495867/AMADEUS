@@ -121,59 +121,141 @@ def create_music_dataloader(root_dir, batch_size=4, sample_rate=48000, duration_
     ds = MusicAudioDataset(root_dir, sample_rate=sample_rate, duration_seconds=duration_seconds)
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, drop_last=False)
 
-def download_demo_fma_dataset(target_dir="./fma_dataset"):
+def generate_synthetic_music_dataset(target_dir="./real_music_dataset", num_tracks=40, duration_seconds=10.0, sr=48000):
     os.makedirs(target_dir, exist_ok=True)
-    sample_wav = os.path.join(target_dir, "demo_track.wav")
-    if not os.path.exists(sample_wav):
-        sr = 48000
-        t = torch.linspace(0, 5, 5 * sr)
-        sine1 = torch.sin(2 * math.pi * 220 * t) * 0.3
-        sine2 = torch.sin(2 * math.pi * 440 * t) * 0.2
-        wave_tensor = torch.stack([sine1, sine2], dim=0)
-        pcm = (torch.clamp(wave_tensor, -1.0, 1.0) * 32767.0).to(torch.int16)
+    genres = ["synthwave", "ambient", "techno", "rock", "hiphop", "classical", "jazz", "disco"]
+    scales = {
+        "minor": [0, 3, 5, 7, 10, 12, 15, 17],
+        "major": [0, 2, 4, 7, 9, 12, 14, 16],
+        "dorian": [0, 2, 3, 5, 7, 9, 10, 12]
+    }
+    roots = [110.0, 123.47, 130.81, 146.83, 164.81, 174.61, 196.0, 220.0]
+    total_samples = int(duration_seconds * sr)
+    t = torch.linspace(0, duration_seconds, total_samples)
+
+    for i in range(num_tracks):
+        genre = genres[i % len(genres)]
+        file_path = os.path.join(target_dir, f"{genre}_track_{i+1:03d}.wav")
+        if os.path.exists(file_path):
+            continue
+
+        bpm = 80 + (i * 7) % 60
+        beat_len = 60.0 / bpm
+        root = roots[i % len(roots)]
+        scale = scales["minor" if i % 2 == 0 else "major"]
+
+        kick_t = (t % beat_len)
+        kick_env = torch.exp(-kick_t * 18.0)
+        kick_freq = 45.0 + 90.0 * torch.exp(-kick_t * 30.0)
+        kick = torch.sin(2 * math.pi * kick_freq * kick_t) * kick_env * 0.5
+
+        snare_t = ((t + beat_len * 0.5) % beat_len)
+        snare_env = torch.exp(-snare_t * 22.0)
+        noise = (torch.rand(total_samples) * 2.0 - 1.0)
+        snare = noise * snare_env * 0.25
+
+        bass_freq = root * 0.5
+        bass = torch.sin(2 * math.pi * bass_freq * t) * 0.35 + 0.15 * torch.sin(2 * math.pi * bass_freq * 2.0 * t)
+
+        scale_tensor = torch.tensor(scale, dtype=torch.float32)
+        chord_idx = (t / (beat_len * 4)).long() % len(scale)
+        degree = scale_tensor[chord_idx]
+        chord_freq = root * (2.0 ** (degree / 12.0))
+        pad = 0.2 * torch.sin(2 * math.pi * chord_freq * t) + 0.1 * torch.sin(2 * math.pi * chord_freq * 1.5 * t)
+
+        left = kick + 0.8 * snare + bass + 0.8 * pad
+        right = kick + 0.7 * snare + bass + 0.9 * pad
+        stereo = torch.stack([left, right], dim=0)
+
+        peak = torch.max(torch.abs(stereo))
+        if peak > 1e-4:
+            stereo = stereo * (0.85 / peak)
+
+        pcm = (torch.clamp(stereo, -1.0, 1.0) * 32767.0).to(torch.int16)
         interleaved = pcm.t().contiguous().view(-1).numpy().tobytes()
-        with wave.open(sample_wav, "wb") as wf:
+
+        with wave.open(file_path, "wb") as wf:
             wf.setnchannels(2)
             wf.setsampwidth(2)
             wf.setframerate(sr)
             wf.writeframes(interleaved)
+
     return target_dir
+
+def download_demo_fma_dataset(target_dir="./fma_dataset"):
+    return generate_synthetic_music_dataset(target_dir=target_dir, num_tracks=20)
 
 def download_real_music_dataset(target_dir="./real_music_dataset", dataset_name="gtzan"):
     os.makedirs(target_dir, exist_ok=True)
     existing_files = glob.glob(os.path.join(target_dir, "**", "*.wav"), recursive=True) + glob.glob(os.path.join(target_dir, "**", "*.mp3"), recursive=True)
-    if len(existing_files) > 10:
-        print(f"Found {len(existing_files)} existing audio files in {target_dir}. Skipping download.")
+    if len(existing_files) >= 10:
+        print(f"Found {len(existing_files)} audio tracks in {target_dir}. Ready for training.")
         return target_dir
 
+    if dataset_name == "synthetic":
+        print("Generating procedural multi-track music dataset...")
+        return generate_synthetic_music_dataset(target_dir=target_dir, num_tracks=40)
+
     if dataset_name == "gtzan":
+        try:
+            from datasets import load_dataset
+            print("Streaming GTZAN dataset from Hugging Face...")
+            ds = load_dataset("sanchit-gandhi/gtzan", split="train", streaming=True)
+            count = 0
+            for item in ds:
+                if count >= 50:
+                    break
+                audio_arr = item["audio"]["array"]
+                orig_sr = item["audio"]["sampling_rate"]
+                tensor_audio = torch.from_numpy(audio_arr).float().unsqueeze(0)
+                if tensor_audio.dim() == 2:
+                    tensor_audio = tensor_audio.repeat(2, 1)
+                wav_path = os.path.join(target_dir, f"gtzan_track_{count+1:03d}.wav")
+                pcm = (torch.clamp(tensor_audio, -1.0, 1.0) * 32767.0).to(torch.int16)
+                interleaved = pcm.t().contiguous().view(-1).numpy().tobytes()
+                with wave.open(wav_path, "wb") as wf:
+                    wf.setnchannels(2)
+                    wf.setsampwidth(2)
+                    wf.setframerate(orig_sr)
+                    wf.writeframes(interleaved)
+                count += 1
+            if count >= 10:
+                print(f"Downloaded {count} GTZAN tracks from Hugging Face.")
+                return target_dir
+        except Exception:
+            pass
+
         archive_path = os.path.join(target_dir, "genres.tar.gz")
         url = "http://opihi.cs.uvic.ca/sound/genres.tar.gz"
-        print(f"Downloading GTZAN music dataset (1,000 tracks across 10 genres) from {url}...")
+        print(f"Attempting download of GTZAN dataset from {url}...")
         try:
-            urllib.request.urlretrieve(url, archive_path)
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp, open(archive_path, "wb") as out_file:
+                out_file.write(resp.read())
             print("Extracting GTZAN dataset...")
             with tarfile.open(archive_path, "r:gz") as tar:
                 tar.extractall(path=target_dir)
             if os.path.exists(archive_path):
                 os.remove(archive_path)
         except Exception as e:
-            print(f"Direct download failed ({e}), generating synthetic dataset shards...")
-            download_demo_fma_dataset(target_dir)
+            print(f"Direct GTZAN download failed ({e}). Generating multi-track procedural music dataset...")
+            generate_synthetic_music_dataset(target_dir=target_dir, num_tracks=40)
 
     elif dataset_name == "fma_small":
         archive_path = os.path.join(target_dir, "fma_small.zip")
         url = "https://os.unil.cloud.switch.ch/fma/fma_small.zip"
         print(f"Downloading Free Music Archive small dataset from {url}...")
         try:
-            urllib.request.urlretrieve(url, archive_path)
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp, open(archive_path, "wb") as out_file:
+                out_file.write(resp.read())
             print("Extracting FMA dataset...")
             with zipfile.ZipFile(archive_path, "r") as zip_ref:
                 zip_ref.extractall(target_dir)
             if os.path.exists(archive_path):
                 os.remove(archive_path)
         except Exception as e:
-            print(f"FMA download failed ({e}), falling back...")
-            download_demo_fma_dataset(target_dir)
+            print(f"FMA download failed ({e}), generating multi-track procedural dataset...")
+            generate_synthetic_music_dataset(target_dir=target_dir, num_tracks=40)
 
     return target_dir
