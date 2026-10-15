@@ -1,10 +1,16 @@
 from setuptools import setup, find_packages
 
+found = find_packages()
+packages = ["amadeus"] + [f"amadeus.{p}" for p in found]
+package_dir = {"amadeus": "."}
+for p in found:
+    package_dir[f"amadeus.{p}"] = p
+
 setup(
     name="amadeus",
     version="1.0.0",
-    packages=["amadeus"] + [f"amadeus.{p}" for p in find_packages()],
-    package_dir={"amadeus": "."},
+    packages=packages,
+    package_dir=package_dir,
     install_requires=[
         "torch>=2.0.0",
         "torchaudio>=2.0.0",
