@@ -1,0 +1,24 @@
+model:
+  in_channels: 64
+  hidden_size: 1152
+  num_layers: 28
+  num_heads: 16
+  patch_size: 4
+  rate_hz: 50
+  style_dim: 512
+  loudness_dim: 1
+  text_dim: 768
+  melody_dim: 256
+  rhythm_dim: 64
+  semantic_dim: 256
+flow_matching:
+  steps: 32
+  cfg_scale: 3.5
+  melody_cfg_scale: 2.0
+  sigma_min: 0.0001
+  logit_normal_mean: 0.0
+  logit_normal_std: 1.0
+training:
+  batch_size: 32
+  lr: 0.0001
+  weight_decay: 0.01

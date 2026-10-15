@@ -1,0 +1,18 @@
+model:
+  vocab_size: 2048
+  num_codebooks: 4
+  hidden_size: 1536
+  num_layers: 24
+  num_heads: 16
+  max_seq_len: 8192
+  rate_hz: 25
+  dropout: 0.1
+  style_dim: 512
+  melody_dim: 256
+  text_dim: 768
+  rhythm_dim: 64
+training:
+  batch_size: 32
+  lr: 0.00015
+  weight_decay: 0.05
+  condition_dropout: 0.1

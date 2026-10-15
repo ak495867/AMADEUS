@@ -1,0 +1,12 @@
+model:
+  vocab_size: 4096
+  hidden_size: 768
+  num_layers: 12
+  num_heads: 12
+  max_seq_len: 1024
+  rate_hz: 1
+  params_approx: 150000000
+training:
+  batch_size: 64
+  lr: 0.0003
+  weight_decay: 0.01

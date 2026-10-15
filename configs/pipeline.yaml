@@ -1,0 +1,21 @@
+pipeline:
+  sample_rate: 48000
+  channels: 2
+  default_duration: 120
+  window_seconds: 20
+  crossfade_seconds: 2
+  retrieval_k: 3
+  device: cpu
+controls:
+  default_text_cfg: 4.5
+  default_melody_strength: 0.6
+  default_style_strength: 0.7
+  default_steps: 32
+  realtime_steps: 4
+stems:
+  enabled: true
+  names: ["drums", "bass", "harmony", "lead"]
+safety:
+  max_ngram_melody_match: 8
+  artist_blocklist_enabled: true
+  watermark_enabled: true

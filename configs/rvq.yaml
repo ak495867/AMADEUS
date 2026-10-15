@@ -1,0 +1,7 @@
+model:
+  num_codebooks: 4
+  codebook_size: 2048
+  codebook_dim: 256
+  rate_hz: 25
+  decay: 0.99
+  commitment_weight: 0.25

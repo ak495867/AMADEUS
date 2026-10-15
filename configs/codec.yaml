@@ -1,0 +1,16 @@
+model:
+  sample_rate: 48000
+  channels: 2
+  latent_dim: 64
+  frame_rate: 50
+  stride: 960
+  encoder_channels: 128
+  decoder_channels: 512
+  ratios: [8, 5, 4, 3, 2]
+  stems: ["drums", "bass", "harmony", "lead"]
+training:
+  batch_size: 16
+  lr: 0.0002
+  kl_weight: 0.0001
+  stft_weight: 45.0
+  adv_weight: 1.0

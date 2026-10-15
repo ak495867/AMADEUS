@@ -1,0 +1,7 @@
+distill:
+  student_steps: 4
+  teacher_steps: 32
+  loss_type: consistency
+  ema_decay: 0.999
+  lr: 0.00005
+  batch_size: 16
