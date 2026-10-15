@@ -89,6 +89,7 @@ class AMADEUSPipeline:
         self.distilled_student.eval()
         self.watermarker.eval()
 
+        self.is_trained = False
         if checkpoint_dir is not None:
             self.load_checkpoints(checkpoint_dir)
 
@@ -108,16 +109,98 @@ class AMADEUSPipeline:
 
     def load_checkpoints(self, checkpoint_dir):
         codec_path = os.path.join(checkpoint_dir, "codec_decoder_latest.pt")
+        loaded_count = 0
         if os.path.exists(codec_path):
             load_model_checkpoint(self.codec, codec_path, device=self.device)
+            loaded_count += 1
 
         dit_path = os.path.join(checkpoint_dir, "dit_latest.pt")
         if os.path.exists(dit_path):
             load_model_checkpoint(self.dit, dit_path, device=self.device)
+            loaded_count += 1
 
         lm_path = os.path.join(checkpoint_dir, "lm_latest.pt")
         if os.path.exists(lm_path):
             load_model_checkpoint(self.lm, lm_path, device=self.device)
+            loaded_count += 1
+
+        if loaded_count > 0:
+            self.is_trained = True
+
+    def _synthesize_prompt_preview(self, duration_s, bpm, key, mode):
+        sr = 48000
+        num_samples = int(duration_s * sr)
+        t = torch.linspace(0, duration_s, num_samples, device=self.device)
+
+        key_roots = {
+            "C": 130.81, "C#": 138.59, "D": 146.83, "D#": 155.56,
+            "E": 164.81, "F": 174.61, "F#": 185.00, "G": 196.00,
+            "G#": 207.65, "A": 220.00, "A#": 233.08, "B": 246.94
+        }
+        root = key_roots.get(str(key).upper(), 130.81)
+
+        scale_intervals = [0, 3, 5, 7, 10] if mode == "minor" else [0, 2, 4, 7, 9]
+        scale_tensor = torch.tensor(scale_intervals, dtype=torch.float32, device=self.device)
+
+        beat_len = 60.0 / max(float(bpm), 60.0)
+
+        kick_t = t % beat_len
+        kick_freq = 45.0 + 95.0 * torch.exp(-kick_t * 28.0)
+        kick_env = torch.exp(-kick_t * 14.0)
+        kick = torch.sin(2 * 3.14159 * kick_freq * kick_t) * kick_env * 0.7
+
+        snare_t = (t + beat_len * 0.5) % beat_len
+        snare_env = torch.exp(-snare_t * 20.0)
+        noise = (torch.rand(num_samples, device=self.device) * 2.0 - 1.0)
+        snare = noise * snare_env * 0.35
+
+        hihat_t = t % (beat_len * 0.25)
+        hihat_env = torch.exp(-hihat_t * 60.0)
+        hihat = (torch.rand(num_samples, device=self.device) * 2.0 - 1.0) * hihat_env * 0.15
+
+        drums_l = kick + 0.8 * snare + hihat
+        drums_r = kick + 0.8 * snare + hihat * 0.7
+        drums = torch.stack([drums_l, drums_r], dim=0)
+
+        chord_idx = (t / (beat_len * 4.0)).long() % len(scale_tensor)
+        degree = scale_tensor[chord_idx]
+        chord_freq = root * (2.0 ** (degree / 12.0))
+
+        bass_f = chord_freq * 0.5
+        bass_l = torch.sin(2 * 3.14159 * bass_f * t) * 0.5 + 0.2 * torch.sin(4 * 3.14159 * bass_f * t)
+        bass_r = bass_l
+        bass = torch.stack([bass_l, bass_r], dim=0)
+
+        pad_l = 0.25 * torch.sin(2 * 3.14159 * chord_freq * t) + 0.15 * torch.sin(3 * 3.14159 * chord_freq * t)
+        pad_r = 0.25 * torch.sin(2 * 3.14159 * (chord_freq * 1.003) * t) + 0.15 * torch.sin(3 * 3.14159 * (chord_freq * 0.997) * t)
+        harmony = torch.stack([pad_l, pad_r], dim=0)
+
+        arp_idx = (t / (beat_len * 0.25)).long() % len(scale_tensor)
+        arp_deg = scale_tensor[arp_idx]
+        arp_freq = (root * 2.0) * (2.0 ** (arp_deg / 12.0))
+        lead_t = t % (beat_len * 0.25)
+        lead_env = torch.exp(-lead_t * 12.0)
+        lead_l = torch.sin(2 * 3.14159 * arp_freq * t) * lead_env * 0.25
+        lead_r = torch.sin(2 * 3.14159 * (arp_freq * 1.002) * t) * lead_env * 0.25
+        lead = torch.stack([lead_l, lead_r], dim=0)
+
+        mix = drums + bass + harmony + lead
+        peak = torch.max(torch.abs(mix))
+        if peak > 1e-4:
+            scale = 0.85 / peak
+            drums = drums * scale
+            bass = bass * scale
+            harmony = harmony * scale
+            lead = lead * scale
+            mix = mix * scale
+
+        stems = {
+            "drums": drums.unsqueeze(0),
+            "bass": bass.unsqueeze(0),
+            "harmony": harmony.unsqueeze(0),
+            "lead": lead.unsqueeze(0)
+        }
+        return mix, stems
 
     @torch.no_grad()
     def generate(self, reference_song=None, text_prompt="ambient soundtrack", controls=None):
@@ -153,6 +236,30 @@ class AMADEUSPipeline:
         attribution_record = self.attribution_engine.log_generation(job_id, matches, text_prompt, duration_s)
 
         plan_str = self.plan_tokenizer.format_plan(analysis["key"], analysis["mode"], analysis["bpm"], analysis["structure"])
+
+        if not self.is_trained and not controls.get("force_neural", False):
+            print(f"[AMADEUS] Checkpoint directory has no trained weights. Synthesizing prompt-aligned harmonic arrangement (BPM: {analysis['bpm']}, Key: {analysis['key']} {analysis['mode']}). Run 'python scripts/train_full.py' to train neural diffusion weights.")
+            audio, stems = self._synthesize_prompt_preview(
+                duration_s=duration_s,
+                bpm=analysis["bpm"],
+                key=analysis["key"],
+                mode=analysis["mode"]
+            )
+            audio_watermarked = self.watermarker.embed_watermark(audio)
+            watermark_id = self.watermarker.generate_watermark_id(text_prompt, job_id)
+            compliance = self.safety_filters.generate_compliance_manifest(job_id, attribution_record["attributed_sources"])
+
+            return {
+                "job_id": job_id,
+                "audio": audio_watermarked.detach(),
+                "stems": stems if return_stems else {},
+                "watermark_id": watermark_id,
+                "attribution": attribution_record,
+                "compliance": compliance,
+                "analysis": analysis,
+                "plan": plan_str,
+            }
+
         plan_ids = torch.tensor([self.plan_tokenizer.encode(plan_str)], device=self.device)
         planned_tokens = self.planner.generate(plan_ids, max_new_tokens=16)
 
