@@ -36,6 +36,10 @@ class MusicRetrievalIndex:
         if self.embeddings is None or len(self.catalog) == 0:
             return [], torch.zeros((1, 512), device=query_emb.device if hasattr(query_emb, "device") else "cpu")
 
+        dev = query_emb.device if hasattr(query_emb, "device") else "cpu"
+        if self.embeddings.device != dev:
+            self.embeddings = self.embeddings.to(dev)
+
         if query_emb.dim() == 1:
             query_emb = query_emb.unsqueeze(0)
         query_emb = F.normalize(query_emb, p=2, dim=-1)
