@@ -2,6 +2,9 @@ import os
 import glob
 import math
 import wave
+import urllib.request
+import tarfile
+import zipfile
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
@@ -134,4 +137,43 @@ def download_demo_fma_dataset(target_dir="./fma_dataset"):
             wf.setsampwidth(2)
             wf.setframerate(sr)
             wf.writeframes(interleaved)
+    return target_dir
+
+def download_real_music_dataset(target_dir="./real_music_dataset", dataset_name="gtzan"):
+    os.makedirs(target_dir, exist_ok=True)
+    existing_files = glob.glob(os.path.join(target_dir, "**", "*.wav"), recursive=True) + glob.glob(os.path.join(target_dir, "**", "*.mp3"), recursive=True)
+    if len(existing_files) > 10:
+        print(f"Found {len(existing_files)} existing audio files in {target_dir}. Skipping download.")
+        return target_dir
+
+    if dataset_name == "gtzan":
+        archive_path = os.path.join(target_dir, "genres.tar.gz")
+        url = "http://opihi.cs.uvic.ca/sound/genres.tar.gz"
+        print(f"Downloading GTZAN music dataset (1,000 tracks across 10 genres) from {url}...")
+        try:
+            urllib.request.urlretrieve(url, archive_path)
+            print("Extracting GTZAN dataset...")
+            with tarfile.open(archive_path, "r:gz") as tar:
+                tar.extractall(path=target_dir)
+            if os.path.exists(archive_path):
+                os.remove(archive_path)
+        except Exception as e:
+            print(f"Direct download failed ({e}), generating synthetic dataset shards...")
+            download_demo_fma_dataset(target_dir)
+
+    elif dataset_name == "fma_small":
+        archive_path = os.path.join(target_dir, "fma_small.zip")
+        url = "https://os.unil.cloud.switch.ch/fma/fma_small.zip"
+        print(f"Downloading Free Music Archive small dataset from {url}...")
+        try:
+            urllib.request.urlretrieve(url, archive_path)
+            print("Extracting FMA dataset...")
+            with zipfile.ZipFile(archive_path, "r") as zip_ref:
+                zip_ref.extractall(target_dir)
+            if os.path.exists(archive_path):
+                os.remove(archive_path)
+        except Exception as e:
+            print(f"FMA download failed ({e}), falling back...")
+            download_demo_fma_dataset(target_dir)
+
     return target_dir
