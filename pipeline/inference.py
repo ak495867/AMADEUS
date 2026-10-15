@@ -81,6 +81,14 @@ class AMADEUSPipeline:
 
         self._seed_default_catalog()
 
+        self.planner.eval()
+        self.lm.eval()
+        self.dit.eval()
+        self.codec.eval()
+        self.text_encoder.eval()
+        self.distilled_student.eval()
+        self.watermarker.eval()
+
         if checkpoint_dir is not None:
             self.load_checkpoints(checkpoint_dir)
 
@@ -111,6 +119,7 @@ class AMADEUSPipeline:
         if os.path.exists(lm_path):
             load_model_checkpoint(self.lm, lm_path, device=self.device)
 
+    @torch.no_grad()
     def generate(self, reference_song=None, text_prompt="ambient soundtrack", controls=None):
         if controls is None:
             controls = {}
@@ -203,6 +212,7 @@ class AMADEUSPipeline:
 
         if return_stems:
             audio, stems = self.codec(z, return_stems=True)
+            stems = {k: v.detach() for k, v in stems.items()}
         else:
             audio = self.codec(z, return_stems=False)
             stems = {}
@@ -214,7 +224,7 @@ class AMADEUSPipeline:
 
         return {
             "job_id": job_id,
-            "audio": audio_watermarked,
+            "audio": audio_watermarked.detach(),
             "stems": stems,
             "watermark_id": watermark_id,
             "attribution": attribution_record,

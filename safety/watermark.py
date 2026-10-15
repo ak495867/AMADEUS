@@ -28,6 +28,7 @@ class AudioSealWatermarker(nn.Module):
         h = hashlib.sha256(f"{prompt}_{timestamp_str}".encode()).hexdigest()
         return f"amadeus-seal-{h[:16]}"
 
+    @torch.no_grad()
     def embed_watermark(self, audio, watermark_scale=0.003):
         if audio.dim() == 2:
             audio_in = audio.unsqueeze(0)
@@ -36,8 +37,10 @@ class AudioSealWatermarker(nn.Module):
         noise_carrier = self.encoder(audio_in)
         watermarked = audio_in + watermark_scale * noise_carrier
         watermarked = torch.clamp(watermarked, -1.0, 1.0)
-        return watermarked.squeeze(0) if audio.dim() == 2 else watermarked
+        out = watermarked.squeeze(0) if audio.dim() == 2 else watermarked
+        return out.detach()
 
+    @torch.no_grad()
     def detect_watermark(self, audio):
         if audio.dim() == 2:
             audio_in = audio.unsqueeze(0)
